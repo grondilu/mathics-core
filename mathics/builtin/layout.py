@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 
 """
-This module contains symbols used to define the high level layout for
+This module contains symbols used to define the high level layout for \
 expression formatting.
 
-For instance, to represent a set of consecutive expressions in a row,
-we can use ``Row``
+For instance, to represent a set of consecutive expressions in a row, \
+we can use ``Row``.
 
 """
 from typing import Optional, Union
@@ -18,28 +18,148 @@ from mathics.builtin.options import options_to_rules
 from mathics.core.atoms import Integer, Integer1, Real, String
 from mathics.core.convert.op import operator_to_ascii, operator_to_unicode
 from mathics.core.element import BaseElement
+from mathics.core.evaluation import Evaluation
 from mathics.core.expression import Expression
 from mathics.core.list import ListExpression
 from mathics.core.symbols import Atom, Symbol
 from mathics.core.systemsymbols import (
     SymbolFullForm,
-    SymbolInfix,
     SymbolInputForm,
     SymbolLeft,
     SymbolMakeBoxes,
     SymbolNone,
     SymbolOutputForm,
     SymbolRight,
+    SymbolRowBox,
 )
-from mathics.eval.makeboxes import format_element, make_boxes_infix
+from mathics.eval.makeboxes import eval_fullform_makeboxes, format_element, parenthesize
 
 SymbolNonAssociative = Symbol("System`NonAssociative")
 SymbolSubscriptBox = Symbol("System`SubscriptBox")
 
 
+####################################################################
+# This section might get moved to mathics.box
+#
+# Some of the code below get replace Mathics code or may get put in
+# collection of boxing modules,
+# e.g. ``mathics.box.boxes_operators.box_infix()``.
+#
+####################################################################
+
+
+def box_infix(
+    expr: Expression,
+    operator: BaseElement,
+    form: Symbol,
+    evaluation: Evaluation,
+    precedence_value: Optional[int] = 0,
+    grouping: Optional[str] = None,
+) -> Optional[Expression]:
+    """Implements MakeBoxes[Infix[...]].
+    This function kicks off boxing for Infix operators.
+
+    Operators are processed to add spaces and to use the right encoding.
+    """
+
+    # FIXME: this should go into a some formatter.
+    def format_operator(operator) -> Union[String, BaseElement]:
+        """
+        Format infix operator `operator`. To do this outside parameter form is used.
+        Sometimes no changes are made and operator is returned unchanged.
+
+        This function probably should be rewritten be more scalable across other forms
+        and moved to a module that contiaing similar formatting routines.
+        """
+        if not isinstance(operator, String):
+            return MakeBoxes(operator, form)
+
+        op_str = operator.value
+
+        # FIXME: performing a check using the operator symbol representation feels a bit
+        # fragile. The operator name seems more straightforward and more robust.
+        if form == SymbolInputForm and op_str in ["*", "^", " "]:
+            return operator
+        elif (
+            form in (SymbolInputForm, SymbolOutputForm)
+            and not op_str.startswith(" ")
+            and not op_str.endswith(" ")
+        ):
+            # FIXME: Again, testing on specific forms is fragile and not scalable.
+            op = String(" " + op_str + " ")
+            return op
+        return operator
+
+    if isinstance(expr, Atom):
+        evaluation.message("Infix", "normal", Integer1)
+        return None
+
+    elements = expr.elements
+    if len(elements) > 1:
+        if operator.has_form("List", len(elements) - 1):
+            operator = [format_operator(op) for op in operator.elements]
+            return box_infix_elements(
+                elements, operator, precedence_value, grouping, form
+            )
+        else:
+            encoding_rule = evaluation.definitions.get_ownvalue("$CharacterEncoding")
+            encoding = "UTF8" if encoding_rule is None else encoding_rule.replace.value
+            op_str = (
+                operator.value if isinstance(operator, String) else operator.short_name
+            )
+            if encoding == "ASCII":
+                operator = format_operator(
+                    String(operator_to_ascii.get(op_str, op_str))
+                )
+            else:
+                operator = format_operator(
+                    String(operator_to_unicode.get(op_str, op_str))
+                )
+
+        return box_infix_elements(elements, operator, precedence_value, grouping, form)
+
+    elif len(elements) == 1:
+        return MakeBoxes(elements[0], form)
+    else:
+        return MakeBoxes(expr, form)
+
+
+# FIXME: op should be a string, so remove the Union.
+def box_infix_elements(
+    elements, op: Union[String, list], precedence: int, grouping, form: Symbol
+) -> Expression:
+    result = []
+    for index, element in enumerate(elements):
+        if index > 0:
+            if isinstance(op, list):
+                result.append(op[index - 1])
+            else:
+                result.append(op)
+        parenthesized = False
+        if grouping == "System`NonAssociative":
+            parenthesized = True
+        elif grouping == "System`Left" and index > 0:
+            parenthesized = True
+        elif grouping == "System`Right" and index == 0:
+            parenthesized = True
+
+        element_boxes = Expression(SymbolMakeBoxes, element, form)
+        element = parenthesize(precedence, element, element_boxes, parenthesized)
+
+        result.append(element)
+    return Expression(SymbolRowBox, ListExpression(*result))
+
+
+####################################################################
+# End of section of code that might be in mathics.box.
+####################################################################
+
+
 class Center(Builtin):
     """
-    <url>:WMA link:https://reference.wolfram.com/language/ref/Center.html</url>
+    <url>
+    :WMA link:
+    https://reference.wolfram.com/language/ref/Center.html</url>
 
     <dl>
       <dt>'Center'
@@ -105,7 +225,7 @@ class Grid(Builtin):
     options = GridBox.options
     summary_text = " 2D layout containing arbitrary objects"
 
-    def apply_makeboxes(self, array, f, evaluation, options) -> Expression:
+    def eval_makeboxes(self, array, f, evaluation: Evaluation, options) -> Expression:
         """MakeBoxes[Grid[array_?MatrixQ, OptionsPattern[Grid]],
         f:StandardForm|TraditionalForm|OutputForm]"""
         return GridBox(
@@ -166,168 +286,43 @@ class Infix(Builtin):
 
     # the right rule should be
     # mbexpression:MakeBoxes[Infix[___], form]
-
-    def eval_infix_1(self, expr: Expression, form: Symbol, evaluation):
-        """MakeBoxes[Infix[expr_],
+    def eval_makeboxes(self, expression, form, evaluation: Evaluation):
+        """MakeBoxes[Infix[___],
         form:StandardForm|TraditionalForm|OutputForm|InputForm]"""
-        return self.do_eval_infix(expr, String("~"), form, evaluation)
+        infix_expr = expression.elements[0]
+        elements = list(infix_expr.elements)
+        num_parms = len(elements)
 
-    def eval_infix_2(
-        self, expr: Expression, operator: BaseElement, form: Symbol, evaluation
-    ):
-        """MakeBoxes[Infix[expr_, operator_],
-        form:StandardForm|TraditionalForm|OutputForm|InputForm]"""
-        return self.do_eval_infix(expr, operator, form, evaluation)
+        if num_parms == 0 or num_parms > 4:
+            evaluation.message("Infix", "argb", Integer(num_parms))
+            return eval_fullform_makeboxes(infix_expr, evaluation, form)
 
-    def eval_infix_3(
-        self,
-        expr: Expression,
-        operator: BaseElement,
-        precedence: BaseElement,
-        form: Symbol,
-        evaluation,
-    ):
-        """MakeBoxes[Infix[expr_, operator_, precedence_],
-        form:StandardForm|TraditionalForm|OutputForm|InputForm]"""
+        if num_parms == 1:
+            expr = elements[0]
+            return box_infix(expr, String("~"), form, evaluation)
+        if num_parms == 2:
+            expr, operator = elements
+            return box_infix(expr, operator, form, evaluation)
 
+        expr, operator, precedence = elements[:3]
         if not isinstance(precedence, Integer):
             evaluation.message(
                 "Infix",
                 "intm",
-                Expression(
-                    SymbolFullForm, Expression(SymbolInfix, expr, operator, precedence)
-                ),
+                Expression(SymbolFullForm, infix_expr),
             )
-            return
+            return eval_fullform_makeboxes(infix_expr, evaluation, form)
 
-        return self.do_eval_infix(expr, operator, form, evaluation, precedence.value)
-
-    def eval_infix_4(
-        self,
-        expr: Expression,
-        operator: BaseElement,
-        precedence: BaseElement,
-        grouping: BaseElement,
-        form: Symbol,
-        evaluation,
-    ):
-        """MakeBoxes[Infix[expr_, operator_, precedence_, grouping_],
-        form:StandardForm|TraditionalForm|OutputForm|InputForm]"""
-        if not isinstance(precedence, Integer):
-            fullform_expr = Expression(
-                SymbolFullForm,
-                Expression(SymbolInfix, expr, operator, precedence, grouping),
-            )
-            evaluation.message(
-                "Infix",
-                "intm",
-                Expression(
-                    SymbolFullForm,
-                    Expression(SymbolInfix, expr, operator, precedence, grouping),
-                ),
-            )
-            return fullform_expr
-
+        grouping = SymbolNone if num_parms < 4 else elements[3]
         if grouping is SymbolNone:
-            return self.do_eval_infix(
-                expr, operator, form, evaluation, precedence.value
-            )
+            return box_infix(expr, operator, form, evaluation, precedence.value)
         if grouping in (SymbolNonAssociative, SymbolLeft, SymbolRight):
-            return self.do_eval_infix(
+            return box_infix(
                 expr, operator, form, evaluation, precedence.value, grouping.get_name()
             )
 
         evaluation.message("Infix", "argb", grouping)
-        return Expression(
-            SymbolFullForm,
-            Expression(SymbolInfix, expr, operator, precedence, grouping),
-        )
-
-    def eval_infix_default(self, parms, form: Symbol, evaluation):
-        """MakeBoxes[Infix[parms___],
-        form:StandardForm|TraditionalForm|OutputForm|InputForm]"""
-        evaluation.message("Infix", "argb", Integer(len(parms.get_sequence())))
-        return None
-
-    def do_eval_infix(
-        self,
-        expr: Expression,
-        operator: BaseElement,
-        form: Symbol,
-        evaluation,
-        precedence_value: Optional[int] = None,
-        grouping: Optional[str] = None,
-    ):
-        """Implements MakeBoxes[Infix[...]]"""
-
-        ## FIXME: this should go into a some formatter.
-        def format_operator(operator) -> Union[String, BaseElement]:
-            """
-            Format infix operator `operator`. To do this outside parameter form is used.
-            Sometimes no changes are made and operator is returned unchanged.
-
-            This function probably should be rewritten be more scalable across other forms
-            and moved to a module that contiaing similar formatting routines.
-            """
-            if not isinstance(operator, String):
-                return MakeBoxes(operator, form)
-
-            op_str = operator.value
-
-            # FIXME: performing a check using the operator symbol representation feels a bit
-            # fragile. The operator name seems more straightforward and more robust.
-            if form == SymbolInputForm and op_str in ["*", "^", " "]:
-                return operator
-            elif (
-                form in (SymbolInputForm, SymbolOutputForm)
-                and not op_str.startswith(" ")
-                and not op_str.endswith(" ")
-            ):
-                # FIXME: Again, testing on specific forms is fragile and not scalable.
-                op = String(" " + op_str + " ")
-                return op
-            return operator
-
-        if isinstance(expr, Atom):
-            evaluation.message("Infix", "normal", Integer1)
-            return None
-
-        elements = expr.elements
-        if len(elements) > 1:
-            if operator.has_form("List", len(elements) - 1):
-                operator = [format_operator(op) for op in operator.elements]
-                return make_boxes_infix(
-                    elements, operator, precedence_value, grouping, form
-                )
-            else:
-                encoding_rule = evaluation.definitions.get_ownvalue(
-                    "$CharacterEncoding"
-                )
-                encoding = (
-                    "UTF8" if encoding_rule is None else encoding_rule.replace.value
-                )
-                op_str = (
-                    operator.value
-                    if isinstance(operator, String)
-                    else operator.short_name
-                )
-                if encoding == "ASCII":
-                    operator = format_operator(
-                        String(operator_to_ascii.get(op_str, op_str))
-                    )
-                else:
-                    operator = format_operator(
-                        String(operator_to_unicode.get(op_str, op_str))
-                    )
-
-            return make_boxes_infix(
-                elements, operator, precedence_value, grouping, form
-            )
-
-        elif len(elements) == 1:
-            return MakeBoxes(elements[0], form)
-        else:
-            return MakeBoxes(expr, form)
+        return eval_fullform_makeboxes(infix_expr, evaluation, form)
 
 
 class Left(Builtin):
@@ -336,7 +331,8 @@ class Left(Builtin):
 
     <dl>
       <dt>'Left'
-      <dd>is used with operator formatting constructs to specify a left-associative operator.
+      <dd>is used with operator formatting constructs to specify a \
+          left-associative operator.
     </dl>
     """
 
@@ -351,7 +347,8 @@ class NonAssociative(Builtin):
 
         <dl>
           <dt>'NonAssociative'
-          <dd>is used with operator formatting constructs to specify a non-associative operator.
+          <dd>is used with operator formatting constructs to specify a \
+          non-associative operator.
         </dl>
     """
 
@@ -410,7 +407,7 @@ class Precedence(Builtin):
 
     summary_text = "an object to be parenthesized with a given precedence level"
 
-    def apply(self, expr, evaluation) -> Real:
+    def eval(self, expr, evaluation) -> Real:
         "Precedence[expr_]"
 
         name = expr.get_name()
@@ -468,7 +465,8 @@ class Right(Builtin):
 
     <dl>
       <dt>'Right'
-      <dd>is used with operator formatting constructs to specify a right-associative operator.
+      <dd>is used with operator formatting constructs to specify a \
+          right-associative operator.
     </dl>
     """
 
@@ -487,21 +485,21 @@ class Row(Builtin):
 
     summary_text = "1D layouts containing arbitrary objects in a row"
 
-    def apply_makeboxes(self, items, sep, f, evaluation):
+    def eval_makeboxes(self, items, sep, form, evaluation: Evaluation):
         """MakeBoxes[Row[{items___}, sep_:""],
-        f:StandardForm|TraditionalForm|OutputForm]"""
+        form:StandardForm|TraditionalForm|OutputForm]"""
 
         items = items.get_sequence()
         if not isinstance(sep, String):
-            sep = MakeBoxes(sep, f)
+            sep = MakeBoxes(sep, form)
         if len(items) == 1:
-            return MakeBoxes(items[0], f)
+            return MakeBoxes(items[0], form)
         else:
             result = []
             for index, item in enumerate(items):
                 if index > 0 and not sep.sameQ(String("")):
                     result.append(to_boxes(sep, evaluation))
-                item = MakeBoxes(item, f).evaluate(evaluation)
+                item = MakeBoxes(item, form).evaluate(evaluation)
                 item = to_boxes(item, evaluation)
                 result.append(item)
             return RowBox(*result)
@@ -514,22 +512,31 @@ class Style(Builtin):
     <dl>
       <dt>'Style[$expr$, options]'
       <dd>displays $expr$ formatted using the specified option settings.
+
       <dt>'Style[$expr$, "style"]'
       <dd> uses the option settings for the specified style in the current notebook.
+
       <dt>'Style[$expr$, $color$]'
       <dd>displays using the specified color.
+
       <dt>'Style[$expr$, $Bold$]'
       <dd>displays with fonts made bold.
+
       <dt>'Style[$expr$, $Italic$]'
       <dd>displays with fonts made italic.
+
       <dt>'Style[$expr$, $Underlined$]'
       <dd>displays with fonts underlined.
+
       <dt>'Style[$expr$, $Larger$]
       <dd>displays with fonts made larger.
+
       <dt>'Style[$expr$, $Smaller$]'
       <dd>displays with fonts made smaller.
+
       <dt>'Style[$expr$, $n$]'
       <dd>displays with font size n.
+
       <dt>'Style[$expr$, $Tiny$]'
       <dt>'Style[$expr$, $Small$]', etc.
       <dd>display with fonts that are tiny, small, etc.
@@ -562,7 +569,7 @@ class Subscript(Builtin):
 
     summary_text = "format an expression with a subscript"
 
-    def apply_makeboxes(self, x, y, f, evaluation) -> Expression:
+    def eval_makeboxes(self, x, y, f, evaluation) -> Expression:
         "MakeBoxes[Subscript[x_, y__], f:StandardForm|TraditionalForm]"
 
         y = y.get_sequence()
@@ -575,7 +582,9 @@ class Subscript(Builtin):
 
 class Subsuperscript(Builtin):
     """
-    <url>:WMA link:https://reference.wolfram.com/language/ref/Subsuperscript.html</url>
+    <url>
+    :WMA link:
+    https://reference.wolfram.com/language/ref/Subsuperscript.html</url>
 
     <dl>
       <dt>'Subsuperscript[$a$, $b$, $c$]'
@@ -597,7 +606,9 @@ class Subsuperscript(Builtin):
 
 class Superscript(Builtin):
     """
-    <url>:WMA link:https://reference.wolfram.com/language/ref/Superscript.html</url>
+    <url>
+    :WMA link:
+    https://reference.wolfram.com/language/ref/Superscript.html</url>
 
     <dl>
       <dt>'Superscript[$x$, $y$]'
