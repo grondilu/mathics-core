@@ -336,7 +336,7 @@ class Symbol(Atom, NumericOperators, EvalMixin):
 
     All Symbols have a name that can be converted to string.
 
-    A Variable Symbol is a ``Symbol``` that is associated with a
+    A Variable Symbol is a ``Symbol`` that is associated with a
     ``Definition`` that has an ``OwnValue`` that determines its
     evaluation value.
 
@@ -348,7 +348,7 @@ class Symbol(Atom, NumericOperators, EvalMixin):
     a constant value that cannot change. System`True and System`False
     are like this.
 
-    These however are in class PredefinedSymbol. See that class for
+    These however are in class SymbolConstant. See that class for
     more information.
 
     Symbol acts like Python's intern() built-in function or Lisp's
@@ -379,7 +379,7 @@ class Symbol(Atom, NumericOperators, EvalMixin):
         Allocate an object ensuring that for a given ``name`` and ``cls`` we get back the same object,
         id(object) is the same and its object.__hash__() is the same.
 
-        PredefinedSymbol's like System`True and System`False set
+        SymbolConstant's like System`True and System`False set
         ``value`` to something other than ``None``.
 
         """
@@ -639,37 +639,49 @@ class Symbol(Atom, NumericOperators, EvalMixin):
         return builtin.to_sympy(self, **kwargs)
 
 
-class PredefinedSymbol(Symbol):
+class SymbolConstant(Symbol):
     """
-    A Predefined Symbol is a Constant Symbol of the Mathics system whose value can't
-    be changed.
+    A Symbol Constant is Symbol of the Mathics system whose value can't
+    be changed and has a corresponding Python representation.
 
-    Therefore, like say, an Integer constant, we don't need to go
-    through Definitions to get its value.
+    Therefore, like an ``Integer`` constant such as ``Integer0``, we don't
+    need to go through ``Definitions`` to get its Python-equivalent value.
 
-    As we do in numeric constants, a PredefinedSymbols Python-equivalent value not its string name
-    but to its Python-equivalent value. For example for the predefined System`True we
-    we can set its value to the Python ``True`` value.
+    For example for the ``SymbolConstant`` ``System`True``, has its
+    value set to the Python ``True`` value.
+
+    Note this is not the same thing as a Symbolic Constant like ``Pi``,
+    which doesn't have an (exact) Python equivalent representation.
+    Also, Pi *can* be Unprotected and changed, while True, cannot.
+
+    Also note that ``SymbolConstant`` differs from ``Symbol`` in that
+    Symbol has no value field (even when its value happens to be
+    representable in Python. Symbols need to go through Definitions
+    get a Symbol's current value, based on the current context and the
+    state of prior operations on that Symbol/Definition binding.
+
+    In sum, SymbolConstant is partly like Symbol, and partly like
+    Numeric constants.
     """
 
-    # Dictionary of PredefinedSymbols defined so far.
+    # Dictionary of SymbolConstants defined so far.
     # We use this for object uniqueness.
-    # The key is the PredefinedSymbol object's name, and the
+    # The key is the SymbolConstant's value, and the
     # diectionary's value is the Mathics object representing that Python value.
-    _predefined_symbols = {}
+    _symbol_constants = {}
 
     # We use __new__ here to unsure that two Integer's that have the same value
     # return the same object.
     def __new__(cls, name, value):
 
         name = ensure_context(name)
-        self = cls._predefined_symbols.get(name)
+        self = cls._symbol_constants.get(name)
         if self is None:
             self = super().__new__(cls, name)
             self._value = value
 
             # Cache object so we don't allocate again.
-            self._predefined_symbols[name] = self
+            self._symbol_constants[name] = self
 
             # Set a value for self.__hash__() once so that every time
             # it is used this is fast. Note that in contrast to the
@@ -723,10 +735,10 @@ def symbol_set(*symbols: Tuple[Symbol]) -> FrozenSet[Symbol]:
 
 # Symbols used in this module.
 
-# Note, below we are only setting PredefinedSymbol for Symbols which
+# Note, below we are only setting SymbolConstant for Symbols which
 # are both predefined and have the Locked attribute.
 
-# An experiment using PredefinedSymbol("Pi") in the Python code and
+# An experiment using SymbolConstant("Pi") in the Python code and
 # running:
 #    {Pi, Unprotect[Pi];Pi=4; Pi, Pi=.; Pi }
 # show that this does not change the output in any way.
@@ -736,9 +748,9 @@ def symbol_set(*symbols: Tuple[Symbol]) -> FrozenSet[Symbol]:
 # more of the below and in systemsymbols
 # PredefineSymbol.
 
-SymbolFalse = PredefinedSymbol("System`False", value=False)
-SymbolList = PredefinedSymbol("System`List", value=list)
-SymbolTrue = PredefinedSymbol("System`True", value=True)
+SymbolFalse = SymbolConstant("System`False", value=False)
+SymbolList = SymbolConstant("System`List", value=list)
+SymbolTrue = SymbolConstant("System`True", value=True)
 
 SymbolAbs = Symbol("Abs")
 SymbolDivide = Symbol("Divide")
